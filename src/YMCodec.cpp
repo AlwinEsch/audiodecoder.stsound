@@ -18,243 +18,169 @@
  *
  */
 
-#include "libXBMC_addon.h"
+#include <kodi/audiodecoder/AudioDecoder.h>
+#include <kodi/General.h>
+#include <kodi/VFS.h>
+
 #include "StSoundLibrary.h"
 #include "YmMusic.h"
 
-extern "C" {
 #include <stdio.h>
 #include <stdint.h>
 
-#include "kodi_audiodec_dll.h"
-
-ADDON::CHelper_libXBMC_addon *XBMC           = NULL;
-
-ADDON_STATUS ADDON_Create(void* hdl, void* props)
+class CYMCodecAddon
+  : public kodi::addon::CInstanceAudioDecoder
 {
-  if (!XBMC)
-    XBMC = new ADDON::CHelper_libXBMC_addon;
+public:
+  CYMCodecAddon(KODI_HANDLE instance);
+  virtual ~CYMCodecAddon();
 
-  if (!XBMC->RegisterMe(hdl))
+  virtual bool Init(std::string file, unsigned int filecache,
+                    AUDIODEC_STREAM_INFO& streamInfo);
+
+  virtual int64_t Seek(int64_t time);
+  virtual int ReadPCM(uint8_t* buffer, int size, int& actualsize);
+  virtual bool ReadTag(std::string file, std::string& title, std::string& artist, int& length);
+
+private:
+  YMMUSIC *m_pMusic;
+};
+
+
+CYMCodecAddon::CYMCodecAddon(KODI_HANDLE instance)
+  : CInstanceAudioDecoder(instance),
+    m_pMusic(nullptr)
+{
+}
+
+CYMCodecAddon::~CYMCodecAddon()
+{
+  if (m_pMusic)
   {
-    delete XBMC, XBMC=NULL;
-    return ADDON_STATUS_PERMANENT_FAILURE;
+    ymMusicStop(m_pMusic);
+    ymMusicDestroy(m_pMusic);
   }
-
-  return ADDON_STATUS_OK;
 }
 
-//-- Stop ---------------------------------------------------------------------
-// This dll must cease all runtime activities
-// !!! Add-on master function !!!
-//-----------------------------------------------------------------------------
-void ADDON_Stop()
+bool CYMCodecAddon::Init(std::string filename, unsigned int filecache,
+                    AUDIODEC_STREAM_INFO& streamInfo)
 {
-}
+  m_pMusic = ymMusicCreate();
+  if (!m_pMusic)
+    return false;
 
-//-- Destroy ------------------------------------------------------------------
-// Do everything before unload of this add-on
-// !!! Add-on master function !!!
-//-----------------------------------------------------------------------------
-void ADDON_Destroy()
-{
-  XBMC=NULL;
-}
+  kodi::vfs::CFile file;
+  if (!file.OpenFile(filename))
+    return false;
 
-//-- HasSettings --------------------------------------------------------------
-// Returns true if this add-on use settings
-// !!! Add-on master function !!!
-//-----------------------------------------------------------------------------
-bool ADDON_HasSettings()
-{
-  return false;
-}
-
-//-- GetStatus ---------------------------------------------------------------
-// Returns the current Status of this visualisation
-// !!! Add-on master function !!!
-//-----------------------------------------------------------------------------
-ADDON_STATUS ADDON_GetStatus()
-{
-  return ADDON_STATUS_OK;
-}
-
-//-- GetSettings --------------------------------------------------------------
-// Return the settings for XBMC to display
-// !!! Add-on master function !!!
-//-----------------------------------------------------------------------------
-unsigned int ADDON_GetSettings(ADDON_StructSetting ***sSet)
-{
-  return 0;
-}
-
-//-- FreeSettings --------------------------------------------------------------
-// Free the settings struct passed from XBMC
-// !!! Add-on master function !!!
-//-----------------------------------------------------------------------------
-
-void ADDON_FreeSettings()
-{
-}
-
-//-- SetSetting ---------------------------------------------------------------
-// Set a specific Setting value (called from XBMC)
-// !!! Add-on master function !!!
-//-----------------------------------------------------------------------------
-ADDON_STATUS ADDON_SetSetting(const char *strSetting, const void* value)
-{
-  return ADDON_STATUS_OK;
-}
-
-//-- Announce -----------------------------------------------------------------
-// Receive announcements from XBMC
-// !!! Add-on master function !!!
-//-----------------------------------------------------------------------------
-void ADDON_Announce(const char *flag, const char *sender, const char *message, const void *data)
-{
-}
-
-#define SET_IF(ptr, value) \
-{ \
-  if ((ptr)) \
-   *(ptr) = (value); \
-}
-
-void* Init(const char* strFile, unsigned int filecache, int* channels,
-           int* samplerate, int* bitspersample, int64_t* totaltime,
-           int* bitrate, AEDataFormat* format, const AEChannel** channelinfo)
-{
-  if (!strFile)
-    return NULL;
-
-  YMMUSIC *pMusic = ymMusicCreate();
-  if (!pMusic)
-    return NULL;
-
-  void* file = XBMC->OpenFile(strFile,0);
-  if (!file)
-    return NULL;
-  int len = XBMC->GetFileLength(file);
+  int len = file.GetLength();
   char *data = new char[len];
   if (!data)
   {
-    XBMC->CloseFile(file);
-    ymMusicDestroy(pMusic);
-    return NULL;
+    ymMusicDestroy(m_pMusic);
+    return false;
   }
-  XBMC->ReadFile(file, data, len);
-  XBMC->CloseFile(file);
 
-  int res = ymMusicLoadMemory(pMusic, data, len);
+  file.Read(data, len);
+
+  int res = ymMusicLoadMemory(m_pMusic, data, len);
   delete[] data;
   if (res)
   {
-    ymMusicSetLoopMode(pMusic, YMFALSE);
-    ymMusicPlay(pMusic);
+    ymMusicSetLoopMode(m_pMusic, YMFALSE);
+    ymMusicPlay(m_pMusic);
     ymMusicInfo_t info;
-    ymMusicGetInfo(pMusic, &info);
+    ymMusicGetInfo(m_pMusic, &info);
 
-    SET_IF(channels, 1)
-    SET_IF(samplerate, 44100)
-    SET_IF(bitspersample, 16)
-    SET_IF(totaltime, info.musicTimeInSec*1000)
-    SET_IF(format, AE_FMT_S16NE)
-    *format = AE_FMT_S16NE;
-    static enum AEChannel map[3] = {
-	    AE_CH_FL, AE_CH_FR, AE_CH_NULL
-    };
-    SET_IF(channelinfo, map)
-    SET_IF(bitrate, 0)
+    streamInfo.channels = 1;
+    streamInfo.samplerate = 44100;
+    streamInfo.bitspersample = 16;
+    streamInfo.totaltime  = info.musicTimeInSec*1000;
+    streamInfo.format = AUDIO_FMT_S16NE;
+    streamInfo.channellist = { AUDIO_CH_FL, AUDIO_CH_FR, AUDIO_CH_NULL };
+    streamInfo.bitrate = 0;
 
-    return pMusic;
+    return m_pMusic;
   }
 
-  ymMusicDestroy(pMusic);
+  ymMusicDestroy(m_pMusic);
+  m_pMusic = nullptr;
 
-  return 0;
+  return false;
 }
 
-int ReadPCM(void* context, uint8_t* pBuffer, int size, int *actualsize)
+int64_t CYMCodecAddon::Seek(int64_t time)
 {
-  if (!context || !pBuffer || !actualsize)
-    return 1;
-
-  if (ymMusicCompute((YMMUSIC*)context,(ymsample*)pBuffer,size/2))
+  if (ymMusicIsSeekable(m_pMusic))
   {
-    *actualsize = size;
-    return 0;
-  }
-  else
-    return 1;
-}
-
-int64_t Seek(void* context, int64_t time)
-{
-  if (!context)
-    return 0;
-
-  if (ymMusicIsSeekable((YMMUSIC*)context))
-  {
-    ymMusicSeek((YMMUSIC*)context, time);
+    ymMusicSeek(m_pMusic, time);
     return time;
   }
 
   return 0;
 }
 
-bool DeInit(void* context)
+int CYMCodecAddon::ReadPCM(uint8_t* buffer, int size, int& actualsize)
 {
-  if (!context)
-    return true;
+  if (!buffer)
+    return 1;
 
-  ymMusicStop((YMMUSIC*)context);
-  ymMusicDestroy((YMMUSIC*)context);
-
-  return true;
+  if (ymMusicCompute(m_pMusic,(ymsample*)buffer,size/2))
+  {
+    actualsize = size;
+    return 0;
+  }
+  else
+    return 1;
 }
 
-bool ReadTag(const char* strFile, char* title, char* artist, int* length)
+bool CYMCodecAddon::ReadTag(std::string filename, std::string& title, std::string& artist, int& length)
 {
-  if (!strFile)
+  kodi::vfs::CFile file;
+  if (!file.OpenFile(filename))
     return false;
 
-  void* file = XBMC->OpenFile(strFile,0);
-  if (!file)
-    return false;
-
-  int len = XBMC->GetFileLength(file);
+  int len = file.GetLength();
   char *data = new char[len];
   YMMUSIC *pMusic = (YMMUSIC*)new CYmMusic;
 
   if (!data || !pMusic)
-  {
-    XBMC->CloseFile(file);
     return false;
-  }
 
-  XBMC->ReadFile(file, data, len);
-  XBMC->CloseFile(file);
+  file.Read(data, len);
 
-  SET_IF(length, 0)
+  length = 0;
   if (ymMusicLoadMemory(pMusic, data, len))
   {
     ymMusicInfo_t info;
     ymMusicGetInfo(pMusic, &info);
-    if (title)
-      strcpy(title, info.pSongName);
-    if (artist)
-      strcpy(artist, info.pSongAuthor);
-    SET_IF(length, info.musicTimeInSec);
+    title = info.pSongName;
+    artist = info.pSongAuthor;
+    length = info.musicTimeInSec;
   }
   delete[] data;
 
   ymMusicDestroy(pMusic);
 
-  return length?(*length != 0):false;
+  return (length != 0);
 }
 
-int TrackCount(const char* strFile)
+
+class CMyAddon : public ::kodi::addon::CAddonBase
 {
-  return 1;
+public:
+  CMyAddon() { }
+  virtual ADDON_STATUS CreateInstance(int instanceType,
+                                      std::string instanceID,
+                                      KODI_HANDLE instance,
+                                      KODI_HANDLE& addonInstance) override;
+};
+
+ADDON_STATUS CMyAddon::CreateInstance(int instanceType, std::string instanceID, KODI_HANDLE instance, KODI_HANDLE& addonInstance)
+{
+  kodi::Log(LOG_NOTICE, "Creating Timidity Audio Decoder");
+  addonInstance = new CYMCodecAddon(instance);
+  return ADDON_STATUS_OK;
 }
-}
+
+ADDONCREATOR(CMyAddon);
